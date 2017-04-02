@@ -1,12 +1,23 @@
 import os
+import json
+import linecache
+import nltk
+import numpy as np
+import os
+import sys
+from tqdm import tqdm
+import random
+from collections import Counter
+from six.moves.urllib.request import urlretrieve
+from spacy.en import English
 
 from .. import data
 
-base_url = = 'https://rajpurkar.github.io/SQuAD-explorer/dataset/'
+base_url = 'https://rajpurkar.github.io/SQuAD-explorer/dataset/'
 train_filename = "train-v1.1.json"
-train_size = 30288272L
+train_size = 30288272
 dev_filename = "dev-v1.1.json"
-dev_size = 4854279L
+dev_size = 4854279
 
 def reporthook(t):
   """https://github.com/tqdm/tqdm"""
@@ -40,6 +51,8 @@ def maybe_download(url, filename, prefix, num_bytes=None):
         except AttributeError as e:
             print("An error occurred when downloading the file! Please get the dataset using a browser.")
             raise e
+    else:
+       local_filename = os.path.join(prefix, filename)
     # We have a downloaded file
     # Check the stats and make sure they are ok
     file_stats = os.stat(os.path.join(prefix,filename))
@@ -61,9 +74,15 @@ def list_topics(data):
     return list_topics
 
 
-def tokenize(sequence):
-    tokens = [token.replace("``", '"').replace("''", '"') for token in nltk.word_tokenize(sequence)]
-    return map(lambda x:x.encode('utf8'), tokens)
+def tokenizer():
+    nlp = English()
+
+    def tokenize(sequence):
+        doc = nlp(sequence)
+        tokens = [token.text.replace("``", '"').replace("''", '"') for token in doc]
+        return tokens
+
+    return tokenize
 
 
 def token_idx_map(context, context_tokens):
@@ -74,7 +93,7 @@ def token_idx_map(context, context_tokens):
     for char_idx, char in enumerate(context):
         if char != u' ':
             acc += char
-            context_token = unicode(context_tokens[current_token_idx])
+            context_token = context_tokens[current_token_idx]
             if acc == context_token:
                 syn_start = char_idx - len(acc) + 1
                 token_map[syn_start] = [acc, current_token_idx]
@@ -93,6 +112,7 @@ def read_write_dataset(dataset, tier, prefix):
     of questions and answers processed for the dataset"""
     qn, an = 0, 0
     skipped = 0
+    tokenize = tokenizer()
 
     with open(os.path.join(prefix, tier +'.context'), 'w') as context_file,  \
          open(os.path.join(prefix, tier +'.question'), 'w') as question_file,\
@@ -174,18 +194,20 @@ def split_tier(prefix, train_percentage = 0.9, shuffle=False):
     with open(context_filename) as current_file:
         num_lines = sum(1 for line in current_file)
     # Get indices and split into two files
-    indices_dev = range(num_lines)[int(num_lines * train_percentage)::]
+    indices_dev = list(range(num_lines)[int(num_lines * train_percentage)::])
     if shuffle:
         np.random.shuffle(indices_dev)
         print("Shuffling...")
     save_files(prefix, 'val', indices_dev)
-    indices_train = range(num_lines)[:int(num_lines * train_percentage)]
+    indices_train = list(range(num_lines)[:int(num_lines * train_percentage)])
     if shuffle:
         np.random.shuffle(indices_train)
     save_files(prefix, 'train', indices_train)
 
 
 def maybe_download_all(root):
+    if not os.path.exists(root):
+        os.makedirs(root)
     train = maybe_download(base_url, train_filename, root, num_bytes=train_size)
     dev = maybe_download(base_url, dev_filename, root, num_bytes=dev_size)
     return train, dev
@@ -247,19 +269,20 @@ class SQUAD(data.Dataset):
         """
 
         verify(path)
-        prefix = os.path.join(path, "data", "train")
-        fields = ["context", "question", "answer", "span"]       
+        prefix = os.path.join(path, "data", "squad", "train")
+        fields = ["context", "question", "answer", "span"]
         train_filenames = [prefix + '.' + field for field in fields]
         train_files = [open(f) for f in train_filenames]
-       
+
+        c, q, a, s = tuple(train_files)
 
         examples = []
-        c, q, a, s = train_files
         for context, query, answer, span in zip(c, q, a, s):
             context, query, answer, span = \
                 context.strip(), query.strip(), answer.strip(), span.strip()
-                if context != '' and query != '':
-                    examples.append(data.Example.fromlist(
-                        [context, query, answer, span], fields))
+            if context != '' and query != '':
+                examples.append([context, query, answer, span])
 
-        super(SQUAD, self).__init__(examples, fields, **kwargs)
+
+        self.examples = examples
+        self.fields = {}
