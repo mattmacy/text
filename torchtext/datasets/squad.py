@@ -5,6 +5,7 @@ import nltk
 import numpy as np
 import os
 import sys
+import _pickle as pickle
 from tqdm import tqdm
 import random
 from collections import Counter
@@ -43,6 +44,12 @@ def maybe_download(url, filename, prefix, num_bytes=None):
     the contents and returns the filename
     num_bytes=None disables the file size check."""
     local_filename = None
+    if os.path.exists(os.path.join(prefix, filename)):
+        local_filename = os.path.join(prefix,filename)
+        file_stats = os.stat(local_filename)
+        if num_bytes is None or file_stats.st_size == num_bytes:
+            return local_filename
+
     if not os.path.exists(os.path.join(prefix, filename)):
         try:
             print("Downloading file {}...".format(url + filename))
@@ -51,8 +58,7 @@ def maybe_download(url, filename, prefix, num_bytes=None):
         except AttributeError as e:
             print("An error occurred when downloading the file! Please get the dataset using a browser.")
             raise e
-    else:
-       local_filename = os.path.join(prefix, filename)
+
     # We have a downloaded file
     # Check the stats and make sure they are ok
     file_stats = os.stat(os.path.join(prefix,filename))
@@ -224,8 +230,15 @@ def maybe_preprocess(root, dl_train, dl_dev):
                      j(root, "val.answer"), j(root, "val.span")
     tc, tq, ta, ts = j(root, "train.context"), j(root, "train.question"),\
                      j(root, "train.answer"), j(root, "train.span")
-
-    if e(vc) and e(vq) and e(va) and e(vs) and e(tc) and e(tq) and e(ta) and e(ts):
+    dc, dq, da, ds = j(root, "dev.context"), j(root, "dev.question"),\
+                     j(root, "dev.answer"), j(root, "dev.span")
+#    vic, viq, tic, tiq, dic, diq  = j(root, "val.ids.context"), j(root, "val.ids.question"),\
+#                                    j(root, "train.ids.context"), j(root, "train.ids.question") \
+#                                    j(root, "dev.ids.context"), j(root, "dev.ids.question") \
+#  [vic, viq, tic, tiq, dic, diq]
+    files = [vc, vq, va, vs, tc, tq, ta, ts, dc, dq, da, ds]
+    efiles = [f for f in files if not e(f)]
+    if len(efiles) == 0:
         return
 
     train_data = data_from_json(dl_train)
@@ -238,7 +251,7 @@ def maybe_preprocess(root, dl_train, dl_dev):
     dev_data = data_from_json(dl_dev)
     dev_num_questions, dev_num_answers = read_write_dataset(dev_data, 'dev', root)
     print("Processed {} questions and {} answers in dev".format(dev_num_questions, dev_num_answers))
-    
+
 
 def verify(root):
     download_prefix = os.path.join(root, "download", "squad")
@@ -256,7 +269,7 @@ class SQUAD(data.Dataset):
     def sort_key(ex):
         return data.interleave_keys(len(ex.src), len(ex.trg))
 
-    def __init__(self, path, fields=None, **kwargs):
+    def __init__(self, path, tier="train", fields=None, **kwargs):
         """Create a TranslationDataset given paths and fields.
 
         Arguments:
@@ -269,9 +282,27 @@ class SQUAD(data.Dataset):
         """
 
         verify(path)
-        prefix = os.path.join(path, "data", "squad", "train")
-        fields = ["context", "question", "answer", "span"]
-        train_filenames = [prefix + '.' + field for field in fields]
+        prefix = os.path.join(path, "data", "squad", tier)
+        cache_file = prefix + "_examples.pickle"
+
+        fieldnames = ["context", "question", "answer", "span"]
+        if fields is None:
+            raise Exception('expected 4 fields')
+        if len(fields) != 4:
+              raise Exception('expected 4 fields')
+        if not isinstance(fields[0], (tuple, list)):
+            fields = [*zip(fieldnames, fields)]
+
+        # loading pickled version saves ~15s (75%) on
+        # load time
+        print("loading {} examples".format(tier))
+        if os.path.exists(cache_file):
+            with open(cache_file, "rb") as f:
+                examples = pickle.load(f)
+                super(SQUAD, self).__init__(examples, fields, **kwargs)
+                return
+
+        train_filenames = [prefix + '.' + field for field in fieldnames]
         train_files = [open(f) for f in train_filenames]
 
         c, q, a, s = tuple(train_files)
@@ -281,8 +312,17 @@ class SQUAD(data.Dataset):
             context, query, answer, span = \
                 context.strip(), query.strip(), answer.strip(), span.strip()
             if context != '' and query != '':
-                examples.append([context, query, answer, span])
+                examples.append(data.Example.fromlist(
+                    [context, query, answer, span], fields))
+        with open(cache_file, "wb") as f:
+            pickle.dump(examples, f)
 
+        super(SQUAD, self).__init__(examples, fields, **kwargs)
 
-        self.examples = examples
-        self.fields = {}
+    @classmethod
+    def splits(cls, context_field, query_field, span_field, answer_field, root='.'):
+        fields = [context_field, query_field, span_field, answer_field]
+        return (cls(root, tier="train", fields=fields),
+                cls(root, tier="val", fields=fields),
+                cls(root, tier="dev", fields=fields))
+
