@@ -17,4 +17,3 @@ def reporthook(t):
         t.update((b - last_b[0]) * bsize)
         last_b[0] = b
     return inner
-
