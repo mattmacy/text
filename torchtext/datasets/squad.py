@@ -1,7 +1,6 @@
 import os
 import json
 import linecache
-import nltk
 import numpy as np
 import os
 import sys
@@ -13,6 +12,7 @@ from six.moves.urllib.request import urlretrieve
 from spacy.en import English
 
 from .. import data
+from .. import utils
 
 base_url = 'https://rajpurkar.github.io/SQuAD-explorer/dataset/'
 train_filename = "train-v1.1.json"
@@ -20,24 +20,6 @@ train_size = 30288272
 dev_filename = "dev-v1.1.json"
 dev_size = 4854279
 
-def reporthook(t):
-  """https://github.com/tqdm/tqdm"""
-  last_b = [0]
-
-  def inner(b=1, bsize=1, tsize=None):
-    """
-    b: int, optionala
-        Number of blocks just transferred [default: 1].
-    bsize: int, optional
-        Size of each block (in tqdm units) [default: 1].
-    tsize: int, optional
-        Total size (in tqdm units). If [default: None] remains unchanged.
-    """
-    if tsize is not None:
-        t.total = tsize
-    t.update((b - last_b[0]) * bsize)
-    last_b[0] = b
-  return inner
 
 def maybe_download(url, filename, prefix, num_bytes=None):
     """Takes an URL, a filename, and the expected bytes, download
@@ -45,7 +27,7 @@ def maybe_download(url, filename, prefix, num_bytes=None):
     num_bytes=None disables the file size check."""
     local_filename = None
     if os.path.exists(os.path.join(prefix, filename)):
-        local_filename = os.path.join(prefix,filename)
+        local_filename = os.path.join(prefix, filename)
         file_stats = os.stat(local_filename)
         if num_bytes is None or file_stats.st_size == num_bytes:
             return local_filename
@@ -54,20 +36,22 @@ def maybe_download(url, filename, prefix, num_bytes=None):
         try:
             print("Downloading file {}...".format(url + filename))
             with tqdm(unit='B', unit_scale=True, miniters=1, desc=filename) as t:
-                local_filename, _ = urlretrieve(url + filename, os.path.join(prefix,filename), reporthook=reporthook(t))
+                local_filename, _ = urlretrieve(url + filename, os.path.join(prefix, filename),
+                                                reporthook=utils.reporthook(t))
         except AttributeError as e:
             print("An error occurred when downloading the file! Please get the dataset using a browser.")
             raise e
 
     # We have a downloaded file
     # Check the stats and make sure they are ok
-    file_stats = os.stat(os.path.join(prefix,filename))
+    file_stats = os.stat(os.path.join(prefix, filename))
     if num_bytes is None or file_stats.st_size == num_bytes:
         print("File {} successfully loaded".format(filename))
     else:
         raise Exception("Unexpected dataset size. Please get the dataset using a browser.")
 
     return local_filename
+
 
 def data_from_json(filename):
     with open(filename) as data_file:
@@ -76,7 +60,7 @@ def data_from_json(filename):
 
 
 def list_topics(data):
-    list_topics = [data['data'][idx]['title'] for idx in range(0,len(data['data']))]
+    list_topics = [data['data'][idx]['title'] for idx in range(0, len(data['data']))]
     return list_topics
 
 
@@ -120,10 +104,10 @@ def read_write_dataset(dataset, tier, prefix):
     skipped = 0
     tokenize = tokenizer()
 
-    with open(os.path.join(prefix, tier +'.context'), 'w') as context_file,  \
-         open(os.path.join(prefix, tier +'.question'), 'w') as question_file,\
-         open(os.path.join(prefix, tier +'.answer'), 'w') as text_file, \
-         open(os.path.join(prefix, tier +'.span'), 'w') as span_file:
+    with open(os.path.join(prefix, tier + '.context'), 'w') as context_file, \
+         open(os.path.join(prefix, tier + '.question'), 'w') as question_file,\
+         open(os.path.join(prefix, tier + '.answer'), 'w') as text_file, \
+         open(os.path.join(prefix, tier + '.span'), 'w') as span_file:
 
         for articles_id in tqdm(range(len(dataset['data'])), desc="Preprocessing {}".format(tier)):
             article_paragraphs = dataset['data'][articles_id]['paragraphs']
@@ -158,7 +142,7 @@ def read_write_dataset(dataset, tier, prefix):
 
                         answer_end = answer_start + len(text)
 
-                        last_word_answer = len(text_tokens[-1]) # add one to get the first char
+                        last_word_answer = len(text_tokens[-1])  # add one to get the first char
 
                         try:
                             a_start_idx = answer_map[answer_start][1]
@@ -177,23 +161,23 @@ def read_write_dataset(dataset, tier, prefix):
                         an += 1
 
     print("Skipped {} question/answer pairs in {}".format(skipped, tier))
-    return qn,an
+    return qn, an
 
 
 def save_files(prefix, tier, indices):
-  with open(os.path.join(prefix, tier + '.context'), 'w') as context_file,  \
-     open(os.path.join(prefix, tier + '.question'), 'w') as question_file,\
-     open(os.path.join(prefix, tier + '.answer'), 'w') as text_file, \
-     open(os.path.join(prefix, tier + '.span'), 'w') as span_file:
+    with open(os.path.join(prefix, tier + '.context'), 'w') as context_file,  \
+         open(os.path.join(prefix, tier + '.question'), 'w') as question_file,\
+         open(os.path.join(prefix, tier + '.answer'), 'w') as text_file, \
+         open(os.path.join(prefix, tier + '.span'), 'w') as span_file:
 
-    for i in indices:
-      context_file.write(linecache.getline(os.path.join(prefix, 'train.context'), i))
-      question_file.write(linecache.getline(os.path.join(prefix, 'train.question'), i))
-      text_file.write(linecache.getline(os.path.join(prefix, 'train.answer'), i))
-      span_file.write(linecache.getline(os.path.join(prefix, 'train.span'), i))
+        for i in indices:
+            context_file.write(linecache.getline(os.path.join(prefix, 'train.context'), i))
+            question_file.write(linecache.getline(os.path.join(prefix, 'train.question'), i))
+            text_file.write(linecache.getline(os.path.join(prefix, 'train.answer'), i))
+            span_file.write(linecache.getline(os.path.join(prefix, 'train.span'), i))
 
 
-def split_tier(prefix, train_percentage = 0.9, shuffle=False):
+def split_tier(prefix, train_percentage=0.9, shuffle=False):
     # Get number of lines in file
     context_filename = os.path.join(prefix, 'train' + '.context')
     # Get the number of lines
@@ -218,6 +202,7 @@ def maybe_download_all(root):
     dev = maybe_download(base_url, dev_filename, root, num_bytes=dev_size)
     return train, dev
 
+
 def maybe_preprocess(root, dl_train, dl_dev):
 
     e = os.path.exists
@@ -227,11 +212,11 @@ def maybe_preprocess(root, dl_train, dl_dev):
         os.makedirs(root)
 
     vc, vq, va, vs = j(root, "val.context"), j(root, "val.question"),\
-                     j(root, "val.answer"), j(root, "val.span")
+        j(root, "val.answer"), j(root, "val.span")
     tc, tq, ta, ts = j(root, "train.context"), j(root, "train.question"),\
-                     j(root, "train.answer"), j(root, "train.span")
+        j(root, "train.answer"), j(root, "train.span")
     dc, dq, da, ds = j(root, "dev.context"), j(root, "dev.question"),\
-                     j(root, "dev.answer"), j(root, "dev.span")
+        j(root, "dev.answer"), j(root, "dev.span")
 #    vic, viq, tic, tiq, dic, diq  = j(root, "val.ids.context"), j(root, "val.ids.question"),\
 #                                    j(root, "train.ids.context"), j(root, "train.ids.question") \
 #                                    j(root, "dev.ids.context"), j(root, "dev.ids.question") \
@@ -259,7 +244,6 @@ def verify(root):
     dl_train, dl_dev = maybe_download_all(download_prefix)
 
     maybe_preprocess(data_prefix, dl_train, dl_dev)
-    
 
 
 class SQUAD(data.Dataset):
@@ -267,7 +251,7 @@ class SQUAD(data.Dataset):
 
     @staticmethod
     def sort_key(ex):
-        return data.interleave_keys(len(ex.src), len(ex.trg))
+        return data.interleave_keys(len(ex.context), len(ex.question))
 
     def __init__(self, path, tier="train", fields=None, **kwargs):
         """Create a TranslationDataset given paths and fields.
@@ -287,9 +271,9 @@ class SQUAD(data.Dataset):
 
         fieldnames = ["context", "question", "answer", "span"]
         if fields is None:
-            raise Exception('expected 4 fields')
+            raise Exception('expected 3 fields')
         if len(fields) != 3:
-              raise Exception('expected 4 fields')
+            raise Exception('expected 3 fields')
         if not isinstance(fields[0], (tuple, list)):
             fields = [("context", fields[0]), ("question", fields[0]), ("answer", fields[1]), ("span", fields[2])]
 
@@ -325,4 +309,3 @@ class SQUAD(data.Dataset):
         return (cls(root, tier="train", fields=fields),
                 cls(root, tier="val", fields=fields),
                 cls(root, tier="dev", fields=fields))
-
