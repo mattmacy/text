@@ -5,8 +5,10 @@ import os
 import zipfile
 import requests
 import six
-
+from six.moves.urllib.request import urlretrieve
 import torch
+from .utils import reporthook
+from tqdm import tqdm
 
 
 URL = {
@@ -33,10 +35,14 @@ def load_word_vectors(root, wv_type, dim):
     elif os.path.basename(wv_type) in URL:
         url = URL[wv_type]
         print('downloading word vectors from {}'.format(url))
-        r = requests.get(url, stream=True)
-        with zipfile.ZipFile(six.BytesIO(r.content)) as zf:
-            print('extracting word vectors into {}'.format(root))
-            zf.extractall(root)
+        filename = os.path.basename(fname)
+        if not os.path.exists(root):
+            os.makedirs(root)
+        with tqdm(unit='B', unit_scale=True, miniters=1, desc=filename) as t:
+            fname, _ = urlretrieve(url, fname, reporthook=reporthook(t))
+            with zipfile.ZipFile(fname, "r") as zf:
+                print('extracting word vectors into {}'.format(root))
+                zf.extractall(root)
         return load_word_vectors(root, wv_type, dim)
     else:
         print('Unable to load word vectors.')
