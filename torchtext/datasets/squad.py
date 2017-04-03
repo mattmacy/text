@@ -288,10 +288,10 @@ class SQUAD(data.Dataset):
         fieldnames = ["context", "question", "answer", "span"]
         if fields is None:
             raise Exception('expected 4 fields')
-        if len(fields) != 4:
+        if len(fields) != 3:
               raise Exception('expected 4 fields')
         if not isinstance(fields[0], (tuple, list)):
-            fields = [*zip(fieldnames, fields)]
+            fields = [("context", fields[0]), ("question", fields[0]), ("answer", fields[1]), ("span", fields[2])]
 
         # loading pickled version saves ~15s (75%) on
         # load time
@@ -320,8 +320,8 @@ class SQUAD(data.Dataset):
         super(SQUAD, self).__init__(examples, fields, **kwargs)
 
     @classmethod
-    def splits(cls, context_field, query_field, span_field, answer_field, root='.'):
-        fields = [context_field, query_field, span_field, answer_field]
+    def splits(cls, context_field, span_field, answer_field, root='.'):
+        fields = [context_field, span_field, answer_field]
         return (cls(root, tier="train", fields=fields),
                 cls(root, tier="val", fields=fields),
                 cls(root, tier="dev", fields=fields))
