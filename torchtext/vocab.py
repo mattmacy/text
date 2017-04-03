@@ -30,8 +30,8 @@ def load_word_vectors(root, wv_type, dim):
         return torch.load(fname_pt)
     if os.path.isfile(fname + '.txt'):
         fname_txt = fname + '.txt'
-        print('loading word vectors from', fname_txt)
         cm = open(fname_txt, 'rb')
+        cm = [line for line in cm]
     elif os.path.basename(wv_type) in URL:
         url = URL[wv_type]
         print('downloading word vectors from {}'.format(url))
@@ -48,9 +48,9 @@ def load_word_vectors(root, wv_type, dim):
         print('Unable to load word vectors.')
 
     wv_tokens, wv_arr, wv_size = [], array.array('d'), None
-    with cm as f:
-        for line in f:
-            entries = line.strip().split(b' ')
+    if cm is not None:
+        for line in tqdm(range(len(cm)), desc="loading word vectors from {}".format(fname_txt)):
+            entries = cm[line].strip().split(b' ')
             word, entries = entries[0], entries[1:]
             if wv_size is None:
                 wv_size = len(entries)
