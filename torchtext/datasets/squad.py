@@ -6,8 +6,26 @@ import os
 # no metadata
 from collections import Counter
 from tqdm import tqdm
-
+import numpy as np
+import _pickle as pickle
+from torchtext.data import Field
+import torchtext.data as textdata
 import re
+
+def npz_save(name, obj):
+    keys = list(obj.keys())
+    values = list(obj.values())
+    np.savez(name+".npz", keys=keys, values=values)
+
+def npz_load(filename):
+    npzfile = np.load(filename+".npz")
+    keys = npzfile["keys"]
+    values = npzfile["values"]
+    return dict(zip(keys, values))
+
+class SQUAD_config:
+    def __init__(self, **entries):
+        self.__dict__.update(entries)
 
 def get_2d_spans(text, tokenss):
     spanss = []
@@ -118,38 +136,65 @@ def get_span_score_pairs(ypi, yp2i):
     return span_score_pairs
 
 
-def parse_args(path, **kwargs):
-    source_dir = os.path.join(path, "data", "squad")
+def parse_args(path, config, **kwargs):
+    source_dir = os.path.join(path, "download", "squad")
     target_dir = "data/squad"
+    out_dir = "data/work"
     glove_dir = os.path.join(path, "data", "glove")
     argsdict = {
         'source_dir': source_dir,
         'target_dir': target_dir,
+        'data_dir': target_dir,
         'glove_dir': glove_dir,
+        'out_dir': out_dir,
+        'shared_path': None,
         'train_ratio': 0.9,
         'glove_vec_size': 100,
+        'glove_corpus': "6B",
         'mode': 'full',
         'tokenizer': "PTB",
         'split': True,
         'load': True,
         'finetune': False,
         'use_glove_for_unk': True,
-        'known_if_glove': True
+        'known_if_glove': True,
+        'debug': False,
+        # performance thresholds
+        'ques_size_th': 30,
+        'num_sents_th': 8,
+        'sent_size_th': 400,
+        'para_size_th': 256,
+        'word_size_th': 16,
+        'char_count_th': 50,
+        # merge all sentences in a paragraph
+        'squash': False,
+        'lower_word': True,
+        # supervise only the answer sentence
+        'single': False,
+        # max | valid | semi
+        'data_filter': 'max',
     }
     for key in kwargs.keys():
         argsdict[key] = kwargs[key]
-    return Struct(**argsdict)
+    for key in config.__dict__.keys():
+        if '__' in key or key == 'type':
+            continue
+        argsdict[key] = config.__dict__[key]
+    return SQUAD_config(**argsdict)
 
 
 def verify(args):
     e = os.path.exists
     j = os.path.join
     t = args.target_dir
+    w = args.out_dir
 
-    ddev, dtrain, dtest, sdev, strain, stest = \
+    ddev, dtrain, dtest, sdev, strain, stest, out = \
         j(t, "data_dev.json"), j(t, "data_train.json"), j(t, "data_test.json"),\
-        j(t, "shared_dev.json"), j(t, "shared_train.json"), j(t, "shared_test.json")
-    files = [ddev, dtrain, dtest, sdev, strain, stest]
+        j(t, "shared_dev.json"), j(t, "shared_train.json"), j(t, "shared_test.json"),\
+        j(w, "shared.json")
+
+    files = [ddev, dtrain, dtest, sdev, strain, stest, out]
     nef = [f for f in files if not e(f)]
     if len(nef) == 0:
         return
@@ -173,6 +218,8 @@ def create_all(args):
 def prepro(args):
     if not os.path.exists(args.target_dir):
         os.makedirs(args.target_dir)
+    if not os.path.exists(args.out_dir):
+        os.makedirs(args.out_dir)
 
     if args.mode == 'full':
         prepro_each(args, 'train', out_name='train')
@@ -242,8 +289,8 @@ def prepro_each(args, data_type, start_ratio=0.0, stop_ratio=1.0, out_name="defa
     source_path = in_path or os.path.join(args.source_dir, "{}-v1.1.json".format(data_type))
     source_data = json.load(open(source_path, 'r'))
 
-    query, chquery, span, chspan, q2ctxt, ids, idxs = [], [], [], [], [], []
-    pcontext, context, chcontext = [], [], []
+    query, chquery, span, chspan, q2ctxt, ids, idxs = [], [], [], [], [], [], []
+    ctxt, ctxt_sent, chctxt_sent = [], [], []
     answerss = []
     word_counter, char_counter, lower_word_counter = Counter(), Counter(), Counter()
     start_ai = int(round(len(source_data['data']) * start_ratio))
@@ -251,21 +298,21 @@ def prepro_each(args, data_type, start_ratio=0.0, stop_ratio=1.0, out_name="defa
     for ai, article in enumerate(tqdm(source_data['data'][start_ai:stop_ai])):
         xp, cxp = [], []
         pp = []
-        context_sent.append(xp)
-        chcontext_sent.append(cxp)
-        context.append(pp)
+        ctxt_sent.append(xp)
+        chctxt_sent.append(cxp)
+        ctxt.append(pp)
         for pi, para in enumerate(article['paragraphs']):
             # wordss
-            pcontext = para['context']
-            pcontext = pcontext.replace("''", '" ')
-            pcontext = pcontext.replace("``", '" ')
-            xi = list(map(word_tokenize, sent_tokenize(pcontext)))
+            context = para['context']
+            context = context.replace("''", '" ')
+            context = context.replace("``", '" ')
+            xi = list(map(word_tokenize, sent_tokenize(context)))
             xi = [process_tokens(tokens) for tokens in xi]  # process tokens
             # given xi, add chars
             cxi = [[list(xijk) for xijk in xij] for xij in xi]
             xp.append(xi)
             cxp.append(cxi)
-            pp.append(pcontext)
+            pp.append(context)
 
             for xij in xi:
                 for xijk in xij:
@@ -275,8 +322,8 @@ def prepro_each(args, data_type, start_ratio=0.0, stop_ratio=1.0, out_name="defa
                         char_counter[xijkl] += len(para['qas'])
 
             rxi = [ai, pi]
-            assert len(x) - 1 == ai
-            assert len(x[ai]) - 1 == pi
+            assert len(ctxt_sent) - 1 == ai
+            assert len(ctxt_sent[ai]) - 1 == pi
             for qa in para['qas']:
                 # get words
                 qi = word_tokenize(qa['question'])
@@ -290,15 +337,15 @@ def prepro_each(args, data_type, start_ratio=0.0, stop_ratio=1.0, out_name="defa
                     answer_start = answer['answer_start']
                     answer_stop = answer_start + len(answer_text)
                     # TODO : put some function that gives word_start, word_stop here
-                    yi0, yi1 = get_word_span(pcontext, xi, answer_start, answer_stop)
+                    yi0, yi1 = get_word_span(context, xi, answer_start, answer_stop)
                     # yi0 = answer['answer_word_start'] or [0, 0]
                     # yi1 = answer['answer_word_stop'] or [0, 1]
                     assert len(xi[yi0[0]]) > yi0[1]
                     assert len(xi[yi1[0]]) >= yi1[1]
                     w0 = xi[yi0[0]][yi0[1]]
                     w1 = xi[yi1[0]][yi1[1]-1]
-                    i0 = get_word_idx(pcontext, xi, yi0)
-                    i1 = get_word_idx(pcontext, xi, (yi1[0], yi1[1]-1))
+                    i0 = get_word_idx(context, xi, yi0)
+                    i1 = get_word_idx(context, xi, (yi1[0], yi1[1]-1))
                     cyi0 = answer_start - i0
                     cyi1 = answer_stop - i1 - 1
                     # print(answer_text, w0[cyi0:], w1[:cyi1+1])
@@ -328,15 +375,15 @@ def prepro_each(args, data_type, start_ratio=0.0, stop_ratio=1.0, out_name="defa
             if args.debug:
                 break
 
-    word2vec_dict = get_word2vec(args, word_counter)
-    lower_word2vec_dict = get_word2vec(args, lower_word_counter)
+#    word2vec_dict = get_word2vec(args, word_counter)
+#    lower_word2vec_dict = get_word2vec(args, lower_word_counter)
 
     # add context here
     data = {'query': query, 'chquery': chquery, 'span': span, 'q2ctxt': q2ctxt, 'chspan': chspan,
             'idxs': idxs, 'ids': ids, 'answers': answers}
-    shared = {'ctxt_sent': context_sent, 'chctxt_sent': chcontext_sent, 'context': context,
-              'word_counter': word_counter, 'char_counter': char_counter, 'lower_word_counter': lower_word_counter,
-              'word2vec': word2vec_dict, 'lower_word2vec': lower_word2vec_dict}
+    shared = {'ctxt_sent': ctxt_sent, 'chctxt_sent': chctxt_sent, 'ctxt': ctxt,
+              'word_counter': word_counter, 'char_counter': char_counter, 'lower_word_counter': lower_word_counter}
+#              'word2vec': word2vec_dict, 'lower_word2vec': lower_word2vec_dict}
 
     print("saving ...")
     save(args, data, shared, out_name)
@@ -365,77 +412,80 @@ def read_data(config, data_type, ref, data_filter=None):
     print("Loaded {}/{} examples from {}".format(len(valid_idxs), num_examples, data_type))
 
     shared_path = config.shared_path or os.path.join(config.out_dir, "shared.json")
+
     if not os.path.exists(shared_path):
         ref = False
+    char_counter = shared['char_counter']
+    shared['char2idx'] = {char: idx + 2 for idx, char in
+                          enumerate(char for char, count in char_counter.items()
+                                    if count > config.char_count_th)}
+    #if not ref:
+    #     #word2vec_dict = shared['lower_word2vec'] if config.lower_word else shared['word2vec']
+    #     word_counter = shared['lower_word_counter'] if config.lower_word else shared['word_counter']
+    #     if config.finetune:
+    #         shared['word2idx'] = {word: idx + 2 for idx, word in
+    #                               enumerate(word for word, count in word_counter.items()
+    #                                         if count > config.word_count_th or (config.known_if_glove and word in word2vec_dict))}
+    #     else:
+    #         assert config.known_if_glove
+    #         assert config.use_glove_for_unk
+    #         shared['word2idx'] = {word: idx + 2 for idx, word in
+    #                               enumerate(word for word, count in word_counter.items()
+    #                                         if count > config.word_count_th and word not in word2vec_dict)}
     if not ref:
-        word2vec_dict = shared['lower_word2vec'] if config.lower_word else shared['word2vec']
-        word_counter = shared['lower_word_counter'] if config.lower_word else shared['word_counter']
-        char_counter = shared['char_counter']
-        if config.finetune:
-            shared['word2idx'] = {word: idx + 2 for idx, word in
-                                  enumerate(word for word, count in word_counter.items()
-                                            if count > config.word_count_th or (config.known_if_glove and word in word2vec_dict))}
-        else:
-            assert config.known_if_glove
-            assert config.use_glove_for_unk
-            shared['word2idx'] = {word: idx + 2 for idx, word in
-                                  enumerate(word for word, count in word_counter.items()
-                                            if count > config.word_count_th and word not in word2vec_dict)}
-        shared['char2idx'] = {char: idx + 2 for idx, char in
-                              enumerate(char for char, count in char_counter.items()
-                                        if count > config.char_count_th)}
         NULL = "-NULL-"
         UNK = "-UNK-"
-        shared['word2idx'][NULL] = 0
-        shared['word2idx'][UNK] = 1
+        #shared['word2idx'][NULL] = 0
+        #shared['word2idx'][UNK] = 1
         shared['char2idx'][NULL] = 0
         shared['char2idx'][UNK] = 1
-        json.dump({'word2idx': shared['word2idx'], 'char2idx': shared['char2idx']}, open(shared_path, 'w'))
+        json.dump({'char2idx': shared['char2idx']}, open(shared_path, 'w'))
     else:
         new_shared = json.load(open(shared_path, 'r'))
         for key, val in new_shared.items():
             shared[key] = val
 
-    if config.use_glove_for_unk:
-        # create new word2idx and word2vec
-        word2vec_dict = shared['lower_word2vec'] if config.lower_word else shared['word2vec']
-        # stoi of all words not in GloVe
-        new_word2idx_dict = {word: idx for idx, word in enumerate(word for word in word2vec_dict.keys() if word not in shared['word2idx'])}        
-        shared['new_word2idx'] = new_word2idx_dict
-        offset = len(shared['word2idx']
-        )
-        # random embeddings of all non-GloVe words
-        idx2vec_dict = {idx: word2vec_dict[word] for word, idx in new_word2idx_dict.items()}
-        # print("{}/{} unique words have corresponding glove vectors.".format(len(idx2vec_dict), len(word2idx_dict)))
-        new_emb_mat = np.array([idx2vec_dict[idx] for idx in range(len(idx2vec_dict))], dtype='float32')
-        shared['new_emb_mat'] = new_emb_mat
+    # if config.use_glove_for_unk:
+    #     # create new word2idx and word2vec
+    #     word2vec_dict = shared['lower_word2vec'] if config.lower_word else shared['word2vec']
+    #     # stoi of all words not in GloVe
+    #     new_word2idx_dict = {word: idx for idx, word in enumerate(word for word in word2vec_dict.keys() if word not in shared['word2idx'])}
+    #     shared['new_word2idx'] = new_word2idx_dict
+    #     offset = len(shared['word2idx']
+    #     )
+    #     # random embeddings of all non-GloVe words
+    #     idx2vec_dict = {idx: word2vec_dict[word] for word, idx in new_word2idx_dict.items()}
+    #     # print("{}/{} unique words have corresponding glove vectors.".format(len(idx2vec_dict), len(word2idx_dict)))
+    #     new_emb_mat = np.array([idx2vec_dict[idx] for idx in range(len(idx2vec_dict))], dtype='float32')
+    #     shared['new_emb_mat'] = new_emb_mat
 
     return data, shared, valid_idxs
-    
+
+
 def get_squad_data_filter(config):
     def data_filter(data_point, shared):
         assert shared is not None
-        rx, rcx, q, cq, y = (data_point[key] for key in ('*x', '*cx', 'q', 'cq', 'y'))
-        x, cx = shared['x'], shared['cx']
-        if len(q) > config.ques_size_th:
+        q2ctxt,  query, chquery, span = (data_point[key] for key in ('q2ctxt', 'query', 'chquery', 'span'))
+        ctxt, chctxt = shared['ctxt_sent'], shared['chctxt_sent']
+        if len(query) > config.ques_size_th:
             return False
 
         # x filter
-        xi = x[rx[0]][rx[1]]
+        xi = ctxt[q2ctxt[0]][q2ctxt[1]]
         if config.squash:
-            for start, stop in y:
+            for start, stop in span:
                 stop_offset = sum(map(len, xi[:stop[0]]))
                 if stop_offset + stop[1] > config.para_size_th:
                     return False
             return True
 
         if config.single:
-            for start, stop in y:
+            for start, stop in span:
                 if start[0] != stop[0]:
                     return False
 
         if config.data_filter == 'max':
-            for start, stop in y:
+            for start, stop in span:
                     if stop[0] >= config.num_sents_th:
                         return False
                     if start[0] != stop[0]:
@@ -451,7 +501,7 @@ def get_squad_data_filter(config):
             """
             Only answer sentence needs to be valid.
             """
-            for start, stop in y:
+            for start, stop in span:
                 if stop[0] >= config.num_sents_th:
                     return False
                 if start[0] != start[0]:
@@ -464,14 +514,52 @@ def get_squad_data_filter(config):
         return True
     return data_filter
 
-class SQUAD(data.Dataset):
+def update_config(config, data_sets):
+    config.max_num_sents = 0
+    config.max_sent_size = 0
+    config.max_ques_size = 0
+    config.max_word_size = 0
+    config.max_para_size = 0
+    for data, shared, idxs in data_sets:
+        config.char_vocab_size = len(shared['char2idx'])
+        for idx in idxs:
+            q2ctxt = data['q2ctxt'][idx]
+            query = data['query'][idx]
+            sents = shared['ctxt_sent'][q2ctxt[0]][q2ctxt[1]]
+            config.max_para_size = max(config.max_para_size, sum(map(len, sents)))
+            config.max_num_sents = max(config.max_num_sents, len(sents))
+            config.max_sent_size = max(config.max_sent_size, max(map(len, sents)))
+            config.max_word_size = max(config.max_word_size, max(len(word) for sent in sents for word in sent))
+            if len(query) > 0:
+                config.max_ques_size = max(config.max_ques_size, len(query))
+                config.max_word_size = max(config.max_word_size, max(len(word) for word in query))
+
+    if config.mode == 'train':
+        config.max_num_sents = min(config.max_num_sents, config.num_sents_th)
+        config.max_sent_size = min(config.max_sent_size, config.sent_size_th)
+        config.max_para_size = min(config.max_para_size, config.para_size_th)
+
+    config.max_word_size = min(config.max_word_size, config.word_size_th)
+    
+    #config.word_emb_size = len(next(iter(data_sets[0].shared['word2vec'].values())))
+    #config.word_vocab_size = len(data_sets[0].shared['word2idx'])
+
+    if config.single:
+        config.max_num_sents = 1
+    if config.squash:
+        config.max_sent_size = config.max_para_size
+        config.max_num_sents = 1
+
+
+
+class SQUAD(textdata.Dataset):
     """Loads the SQuAD QA dataset."""
 
     @staticmethod
     def sort_key(ex):
         return data.interleave_keys(len(ex.context), len(ex.question))
 
-    def __init__(self, path, tier="train", fields=None, **kwargs):
+    def __init__(self, path, tier="train", fields=None, config=None, **kwargs):
         """Create a TranslationDataset given paths and fields.
 
         Arguments:
@@ -483,11 +571,13 @@ class SQUAD(data.Dataset):
                 data.Dataset.
         """
 
-        config = parse_args(path, kwargs)
+        config = parse_args(path, config, **kwargs)
         verify(config)
         prefix = os.path.join(path, "data", "squad", tier)
+        cache_file = prefix + "_examples"
 
-        other = data.Field()
+        self.config = config
+        other = Field()
         if fields is None:
             raise Exception('expected 3 fields')
         if len(fields) != 3:
@@ -496,42 +586,54 @@ class SQUAD(data.Dataset):
             fields = [("context", fields[0]), ("chcontext", other), ("question", fields[0]), \
                       ("chquestion", other), ("answer", fields[1]), ("span", fields[2])]
             
-        print("loading {} examples".format(tier))
-        if os.path.exists(cache_file):
-            with open(cache_file, "rb") as f:
-                examples = pickle.load(f)
-                super(SQUAD, self).__init__(examples, fields, **kwargs)
-                return
-            
+        if os.path.exists(cache_file + ".npz"):
+            print("fast loading {} examples".format(tier))
+            d = npz_load(cache_file)
+            examples, self.data, self.shared, self.idxs = d['examples'], d['data'], d['shared'], d['idxs']
+            super(SQUAD, self).__init__(examples, fields, **kwargs)
+            return
+
+        print("slow loading {} examples".format(tier))
         qafilter = get_squad_data_filter(config)
         ref = True
         if tier == "train":
             ref = config.load
 
         data, shared, idxs = read_data(config, tier, ref, data_filter=qafilter)
-        update_config(config, data, shared)
+        self.data, self.shared, self.idxs = data, shared, idxs
+
         examples = []
         querylist, chquerylist = data['query'], data['chquery']
-        spanlist, answerlist = data['spans'], data['answers']
+        spanlist, answerlist = data['span'], data['answers']
         sentlist, chsentlist = shared['ctxt_sent'], shared['chctxt_sent']
+        q2ctxt = data['q2ctxt']
         for idx in idxs:
             query, chquery = querylist[idx], chquerylist[idx]
-            answers = []
-            for antwort in answerslist[idx]:
-                answers.append(answer)
+            answer = answerlist[idx]
+            ai, pi = q2ctxt[idx]
+            answer = answerlist[idx]
 
-            ex = [[sent, chsent, query, chquery, answers, span] for sent, chsent, span in \
+            exlist = [[sent, chsent, query, chquery, answer, span] for sent, chsent, span in \
                   zip(sentlist[ai][pi], chsentlist[ai][pi], spanlist[idx])]
-            examples.append(data.Example.fromlist(ex, fields)
-                
-        with open(cache_file, "wb") as f:
-            pickle.dump(examples, f)
+            for ex in exlist:
+                examples.append(textdata.Example.fromlist(ex, fields))
 
+        selfdict = {'data': data, 'shared': shared, 'idxs': idxs, 'examples': examples}
+        npz_save(cache_file, selfdict)
         super(SQUAD, self).__init__(examples, fields, **kwargs)
 
     @classmethod
-    def splits(cls, context_field, span_field, answer_field, root='.'):
+    def splits(cls, context_field, span_field, answer_field, root='.', config=None):
         fields = [context_field, span_field, answer_field]
-        return (cls(root, tier="train", fields=fields),
-                cls(root, tier="dev", fields=fields),
-                cls(root, tier="test", fields=fields))
+
+        train, dev, test =  (cls(root, tier="train", fields=fields, config=config),
+                             cls(root, tier="dev", fields=fields, config=config),
+                             cls(root, tier="test", fields=fields, config=config))
+
+        config = train.config
+        datasets = [(train.data, train.shared, train.idxs),
+                    (dev.data, dev.shared, dev.idxs),
+                    (test.data, test.shared, test.idxs)]
+        update_config(config, datasets)
+        train.config, dev.config, test.config = config, config, config
+        return train, dev, test
