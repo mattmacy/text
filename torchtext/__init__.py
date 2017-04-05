@@ -1,3 +1,3 @@
-from . import data
-from . import datasets
-from . import utils
+from torchtext import data
+from torchtext import datasets
+from torchtext import utils
