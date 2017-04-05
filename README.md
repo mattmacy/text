@@ -71,11 +71,11 @@ LABELS.build_vocab(train)
 
 Some datasets it would be useful to have built in:
 
-- bAbI and successors from FAIR
-- SST (done) and IMDb sentiment
+- SQuAD (done) -- see TBA/train.py for usage
 - SNLI (done)
+- SST (done) and IMDb sentiment
+- bAbI and successors from FAIR
 - Penn Treebank (for language modeling (done) and parsing)
 - WMT and/or IWSLT machine translation
-- SQuAD
 
 See the "test" directory for examples of dataset usage.
