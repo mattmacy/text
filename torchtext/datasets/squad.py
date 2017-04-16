@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import torch
 from collections import Counter
 from tqdm import tqdm
 import numpy as np
@@ -634,3 +635,26 @@ class SQUAD(textdata.Dataset):
         update_config(config, datasets)
         train.config, dev.config, test.config = config, config, config
         return train, dev, test
+
+    @classmethod
+    def iters(cls, config, batch_size=32, device=0, root='.', wv_dir='.', wv_type=None,
+            wf_dim='300d', **kwargs):
+
+        context, answer, span = textdata.Field(), textdata.Field(), textdata.Field()
+        train, dev, test = cls.splits(context, span, answer, root, config)
+
+        context.build_vocab(train, dev, test)
+        train.config.word_vocab_size = len(context.vocab)
+
+        if os.path.isfile(config.vector_cache):
+            context.vocab.vectors = torch.load(config.vector_cache)
+        else:
+            context.vocab.load_vectors(wv_dir=config.data_cache, wv_type=config.word_vectors,
+                wv_dim=config.d_embed)
+            os.makedirs(os.path.dirname(config.vector_cache), exist_ok=True)
+            torch.save(context.vocab.vectors, config.vector_cache)
+
+        config = train.config
+        train, dev, test = textdata.BucketIterator.splits(
+            (train, dev, test), batch_size=config.batch_size, device=config.gpu)
+        train.config, dev.config, test.config = config, config, config
